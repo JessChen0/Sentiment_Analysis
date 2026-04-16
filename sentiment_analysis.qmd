@@ -1,0 +1,12 @@
+---
+title: "Sentiment_analysis"
+author: "Jess Chen"
+format: gfm
+editor: visual
+---
+
+## Approach
+
+1.  Review Chapter of Text mining homework
+2.  Copy code from Chapter 2 and test run
+3.  Find another text corpus and one additional sentiment lexicon
