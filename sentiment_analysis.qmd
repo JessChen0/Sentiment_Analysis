@@ -1,12 +1,220 @@
 ---
 title: "Sentiment_analysis"
-author: "Jess Chen"
+author: "Jess Chen  |"
+date: "April 19, 2026"
 format: gfm
 editor: visual
 ---
 
-## Approach
+## Introduction
 
-1.  Review Chapter of Text mining homework
-2.  Copy code from Chapter 2 and test run
-3.  Find another text corpus and one additional sentiment lexicon
+In this project, we used tidyverse and various sentiment lexicons to conduct sentiment analysis. The first part of this document reproduces sentiment analysis from the book "Text Mining with R" and the latter leverages LLM to create a real time sentiment analysis of FANG companies using Loughran lexicon.
+
+## Part A: Data Reproduction
+
+Our first objective is to reproduce the materials in Chapter 2 of Text Mining with R (Julia Silge and David Robinson). From this exercise, we learn the basic structure of conducting sentiment analysis using Jane Austen novels as an example.
+
+First, we load sentiments into our file.
+
+```{r}
+
+library(tidytext)
+
+get_sentiments("afinn")
+get_sentiments("bing")
+get_sentiments("nrc")
+
+
+```
+
+Next, we want to un-nest the words in each novel, then limit the data to 80 lines and analyze each word's sentiment using bing, ultimately resulting in a final sentiment score per novel.
+
+```{r}
+
+library(janeaustenr)
+library(dplyr)
+library(stringr)
+library(tidyr)
+
+#clean data, unnest words
+tidy_books <- austen_books() %>%
+  group_by(book) %>%
+  mutate(
+    linenumber = row_number(),
+    chapter = cumsum(str_detect(text, 
+                                regex("^chapter [\\divxlc]", 
+                                      ignore_case = TRUE)))) %>%
+  ungroup() %>%
+  unnest_tokens(word, text)
+
+#limit to 80 lines, create separate columns and calculate sentiment
+jane_austen_sentiment <- tidy_books %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(book, index = linenumber %/% 80, sentiment) %>%
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+
+#plot
+library(ggplot2)
+
+ggplot(jane_austen_sentiment, aes(index, sentiment, fill = book)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~book, ncol = 2, scales = "free_x")
+```
+
+We also want to compare how the different lexicon libraries fair in terms of analysis.
+
+```{r}
+
+pride_prejudice <- tidy_books %>% 
+  filter(book == "Pride & Prejudice")
+
+pride_prejudice
+
+afinn <- pride_prejudice %>% 
+  inner_join(get_sentiments("afinn")) %>% 
+  group_by(index = linenumber %/% 80) %>% 
+  summarise(sentiment = sum(value)) %>% 
+  mutate(method = "AFINN")
+
+bing_and_nrc <- bind_rows(
+  pride_prejudice %>% 
+    inner_join(get_sentiments("bing")) %>%
+    mutate(method = "Bing et al."),
+  pride_prejudice %>% 
+    inner_join(get_sentiments("nrc") %>% 
+                 filter(sentiment %in% c("positive", 
+                                         "negative"))
+    ) %>%
+    mutate(method = "NRC")) %>%
+  count(method, index = linenumber %/% 80, sentiment) %>%
+  pivot_wider(names_from = sentiment,
+              values_from = n,
+              values_fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+
+bind_rows(afinn, 
+          bing_and_nrc) %>%
+  ggplot(aes(index, sentiment, fill = method)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~method, ncol = 1, scales = "free_y")
+
+```
+
+It's also relevant to look beyond words, at sentences because words taken in isolation can sometimes be misleading.
+
+```{r}
+#split text into dataframes by chapters
+
+austen_chapters <- austen_books() %>%
+  group_by(book) %>%
+  unnest_tokens(chapter, text, token = "regex", 
+                pattern = "Chapter|CHAPTER [\\dIVXLC]") %>%
+  ungroup()
+
+austen_chapters %>% 
+  group_by(book) %>% 
+  summarise(chapters = n())
+
+#Find negative words by chapter
+
+bingnegative <- get_sentiments("bing") %>% 
+  filter(sentiment == "negative")
+
+wordcounts <- tidy_books %>%
+  group_by(book, chapter) %>%
+  summarize(words = n())
+
+tidy_books %>%
+  semi_join(bingnegative) %>%
+  group_by(book, chapter) %>%
+  summarize(negativewords = n()) %>%
+  left_join(wordcounts, by = c("book", "chapter")) %>%
+  mutate(ratio = negativewords/words) %>%
+  filter(chapter != 0) %>%
+  slice_max(ratio, n = 1) %>% 
+  ungroup()
+
+
+
+```
+
+## Part B: Additional corpus
+
+I would like to use sentiment analysis to look at news headlines and assess public sentiment against companies (for stock/portfolio analysis. To simplify the task, I will use FANG companies.
+
+```{r}
+library(tidyquant)
+library(purrr)
+library(rvest)
+library(dplyr)
+library(tidytext)
+library(tidyverse)
+
+# Function to scrape headlines for any ticker
+get_ticker_news <- function(symbol) {
+  url <- paste0("https://finviz.com/quote.ashx?t=", symbol)
+  
+  # Read the page
+  webpage <- read_html(url)
+  
+  # Extract the news table using its specific ID
+  news_table <- webpage %>%
+    html_nodes(xpath = '//*[@id="news-table"]') %>%
+    html_table() %>%
+    .[[1]] %>%
+    setNames(c("time", "headline")) %>%
+    mutate(ticker = symbol) # Keep track of which company is which
+  
+  return(news_table)
+}
+
+#Run for mulitple companies
+
+# Define your FANG / MAMAA list
+tickers <- c("META", "AMZN", "NFLX", "GOOGL", "AAPL", "MSFT", "NVDA")
+
+# Map the function across all tickers and combine into one big table
+all_news <- map_df(tickers, get_ticker_news)
+
+# Quick look at what we got
+head(all_news)
+
+
+#Run analysis
+# Tokenize the headlines
+tidy_news <- all_news %>%
+  unnest_tokens(word, headline)
+
+# Join with Loughran lexicon
+# Note: You may be prompted to install 'textdata' or agree to terms in the console
+sentiment_counts <- tidy_news %>%
+  inner_join(get_sentiments("loughran")) %>%
+  filter(sentiment %in% c("positive", "negative")) %>%
+  count(ticker, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(score = positive - negative)
+
+
+#Visualize
+
+ggplot(sentiment_counts, aes(x = reorder(ticker, score), y = score, fill = score > 0)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "FANG / Tech Sentiment: Current News Headlines",
+       subtitle = "Using Loughran-McDonald Financial Lexicon",
+       x = "Company Ticker",
+       y = "Net Sentiment Score (Pos - Neg)") +
+  theme_minimal() +
+  guides(fill = "none")
+```
+
+## Conclusion
+
+I find sentiment analysis really interesting. In today's highly connected and social world, popular internet sentiment can prove pivotal to understanding & predicting market behaviour. In the second part of the analysis, it is interesting to see the market's shift away from NVDA, once a market darling, into more traditional companies like Google and Apple.
+
+## References:
+
+Gemini Fast (2026) Google LLM. Link to chat: <https://gemini.google.com/share/96f36b0f8665>
+
+Silge, Julia, and David Robinson. *Text Mining with R: A Tidy Approach*. Accessed \[April 19\]. <https://www.tidytextmining.com/>.
